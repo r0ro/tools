@@ -81,8 +81,12 @@ def dumpAudioHead(f):
 def dumpTag(f):
   global lastTimestamp
 
+  d = f.read(1)
+  if not d:
+    return False
+
   # get tag type
-  type = unpack('B', f.read(1))[0]
+  type = unpack('B', d)[0]
   if type & 0xC0:
     print("Invalid tag type, first 2 bits should be null")
     return False
@@ -139,11 +143,15 @@ def dumpTag(f):
 
 
 with open(in_name, 'rb') as f:
-  if not dumpHeader(f):
-    print("Invalid FLV header", file=sys.stderr)
-    sys.exit(1)
-  i = 0
-  while dumpTag(f):
-    ++i
+  try:
+    if not dumpHeader(f):
+      print("Invalid FLV header", file=sys.stderr)
+      sys.exit(1)
+    i = 0
+    while dumpTag(f):
+      ++i
+  except EOFError:
+    print("unexpected end of file")
+
 
 print("Done, processed " + str(i) + " tags")
