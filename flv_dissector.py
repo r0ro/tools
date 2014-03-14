@@ -54,13 +54,13 @@ def dumpHeader(f):
 lastTimestamp = -1
 
 def dumpAudioHead(f):
-
+  hStr = ""
   audioData = unpack('B', f.read(1))[0]
   fmt = audioData >> 4
   rate = 5.5 * 2**(audioData >> 2 & 0x03)
   size = audioData >> 1 & 0x01
   soundType = audioData & 0x01
-  print("   Audio format: " + str(fmt) +
+  hStr += ("   Audio format: " + str(fmt) +
     " rate: " + str(rate) +
     " sample: " + ["8-bit","16-bit"][size] +
     " type: " + ["mono", "stereo"][soundType])
@@ -69,17 +69,40 @@ def dumpAudioHead(f):
     return 1
 
   aacType = unpack('B', f.read(1))[0]
-  print("   AAC type " + str(aacType))
+  hStr += "\n   AAC type " + str(aacType)
 
   if aacType == 0:
     tags = f.read(2)
-    print("    DATA: " + tags.encode('hex'))
-    return 4
+    hStr += "\n    DATA: " + tags.encode('hex')
+    return 4, hStr
 
-  return 2
+  return 2, hStr
+
+def dumpVideoHead(f):
+  hLen = 1
+  hStr = ""
+  extraInfo = ""
+  a = unpack('B', f.read(1))[0]
+  frameType = a >> 4;
+  codecID = a & 0x0F;
+
+  if (codecID == 7):
+    hLen += 4
+    (a, b, c, d) = unpack('BBBB', f.read(4))
+    pktType = a
+    compTime = (b << 16) | (c << 8) | d
+    extraInfo += " pktType: " + str(pktType) + " comp: " + str(compTime)
+
+  hStr = ("   Video frameType: " + str(frameType) +
+    " Codec: " + str(codecID) +
+    extraInfo)
+
+  return hLen, hStr
+
 
 def dumpTag(f):
   global lastTimestamp
+  hStr = ""
 
   d = f.read(1)
   if not d:
@@ -102,10 +125,7 @@ def dumpTag(f):
   timestamp = a << 24 | b << 16 | c << 8 | d
 
   if timestamp < lastTimestamp:
-    print("Timesamp goes backward: " + lastTimestamp + " vs " + timestamp)
-    return False
-
-  lastTimestamp = timestamp
+    print("Timesamp goes backward: " + str(lastTimestamp) + " vs " + str(timestamp))
 
   # get stream id
   (a,b,c) = unpack('BBB', f.read(3))
@@ -116,7 +136,9 @@ def dumpTag(f):
   # audio
   extraHeaderLen = 0
   if type == 8:
-    extraHeaderLen = dumpAudioHead(f)
+    extraHeaderLen, hStr = dumpAudioHead(f)
+  elif type == 9:
+    extraHeaderLen, hStr = dumpVideoHead(f)
 
   # seek to end of data
   # f.seek(dataSize - extraHeaderLen, 1)
@@ -130,7 +152,12 @@ def dumpTag(f):
   print("> TAG type " + str(tagType) +
        " data size " + str(dataSize) +
        " timestamp " + str(timestamp) +
+       " time diff " + str(timestamp - lastTimestamp) +
        " sha1: " + str(sha1))
+  if hStr != "":
+    print(hStr)
+
+  print ("   DATA: " + payload[0:31].encode('hex'))
 
   # read previous tag size
   prevLen = unpack('!I', f.read(4))[0]
@@ -138,6 +165,8 @@ def dumpTag(f):
     print("invalid prev length got " + str(prevLen) +
       " expected " + str(11 + dataSize))
     return False
+
+  lastTimestamp = timestamp
 
   return True
 
