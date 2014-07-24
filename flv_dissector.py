@@ -53,52 +53,112 @@ def dumpHeader(f):
 
 lastTimestamp = -1
 
-def dumpAudioHead(f):
-  hStr = ""
-  audioData = unpack('B', f.read(1))[0]
+def dumpAAC(data, offset, size):
+  aacType = unpack('B', data[offset])[0]
+  offset += 1
+  print("    > [AAC] Type: " + str(aacType) + "\t|" + ["AAC HEADER", "AAC PAYLOAD"][aacType])
+
+
+audioFormatsStr = [
+  "Linear PCM, platform endian",
+  "ADPCM",
+  "MP3",
+  "Linear PCM, little endian",
+  "Nellymoser 16-kHz mono",
+  "Nellymoser 8-kHz mono",
+  "Nellymoser",
+  "G.711 A-law logarithmic PCM",
+  "G.711 mu-law logarithmic PCM",
+  "reserved",
+  "AAC",
+  "Speex",
+  "MP3 8-Khz",
+  "Device-specific sound"
+]
+
+def dumpAudioPayload(data):
+  offset = 0
+  audioData = unpack('B', data[offset])[0]
   fmt = audioData >> 4
   rate = 5.5 * 2**(audioData >> 2 & 0x03)
   size = audioData >> 1 & 0x01
   soundType = audioData & 0x01
-  hStr += ("   Audio format: " + str(fmt) +
-    " rate: " + str(rate) +
-    " sample: " + ["8-bit","16-bit"][size] +
-    " type: " + ["mono", "stereo"][soundType])
+  offset += 1
 
-  if fmt != 10:
-    return 1
+  print("  > [AUDIO] format: " + audioFormatsStr[fmt] + " | rate: " + str(rate)
+        + " | sample: " + ["8-bit","16-bit"][size]
+        + " type: " + ["mono", "stereo"][soundType])
 
-  aacType = unpack('B', f.read(1))[0]
-  hStr += "\n   AAC type " + str(aacType)
+  if fmt == 10:
+    # dump AAC
+    return dumpAAC(data, 1, size)
 
-  if aacType == 0:
-    tags = f.read(2)
-    hStr += "\n    DATA: " + tags.encode('hex')
-    return 4, hStr
+  return True
 
-  return 2, hStr
+def dumpNALU(data, offset, size):
+  origOffset = offset
 
-def dumpVideoHead(f):
-  hLen = 1
-  hStr = ""
-  extraInfo = ""
-  a = unpack('B', f.read(1))[0]
+  # ignore padding
+  while (unpack('B', data[offset+size-1])[0] == 0):
+    #print("remove padding 0 " + str(unpack('B', data[offset+size-1])) + " SZ: " + str(size))
+    size -= 1
+
+  totLen = size
+
+  m = hashlib.sha1()
+  m.update(data[offset:offset+size])
+  sha1 = m.hexdigest()
+
+  a = unpack('B', data[offset])[0]
+  offset += 1
+  if a & 0x80:
+    print("Invalid forbidden_zero_bit")
+    return False
+  nal_ref_idc = a >> 5
+  nal_unit_type = a & 0x1F
+
+  print("    > [NALU] Type: " + str(nal_unit_type) + "\t| LEN " + str(totLen) + "\t| SHA1: " + sha1)
+  # print("       START: " + data[origOffset:origOffset+32].encode('hex'))
+  # if totLen > 32:
+  #   print("       END:   " + data[origOffset+size-31:origOffset+size].encode('hex'))
+  return True
+
+def dumpVideoPayload(data):
+  # read head
+  offset = 0
+  a = unpack('B', data[offset])[0]
   frameType = a >> 4;
   codecID = a & 0x0F;
+  offset += 1
+  info = "  > [VIDEO] frameType: " + str(frameType) + " | CodecID: " + str(codecID) + " | len: " + str(len(data))
+  if codecID == 7:
+    AVCPacketType = unpack('B', data[offset])[0]
+    offset += 1
+    (a, b, c) = unpack('BBB', data[offset:offset+3])
+    compTime = a << 16 | b << 8 | c
+    offset += 3
+    if AVCPacketType == 0:
+      info += "\t|SEQ HEADER"
+    elif AVCPacketType == 1:
+      info += "\t| AVC NALU"
+    elif AVCPacketType == 2:
+      info += "\t|END OF SEQ"
+    info += "\t| COMP: " + str(compTime)
 
-  if (codecID == 7):
-    hLen += 4
-    (a, b, c, d) = unpack('BBBB', f.read(4))
-    pktType = a
-    compTime = (b << 16) | (c << 8) | d
-    extraInfo += " pktType: " + str(pktType) + " comp: " + str(compTime)
+  print(info)
+  totLen = len(data)
 
-  hStr = ("   Video frameType: " + str(frameType) +
-    " Codec: " + str(codecID) +
-    extraInfo)
+  # print AVC Nalu
+  if codecID == 7 and AVCPacketType == 1:
+    while offset < totLen - 4:
+      # extract nalu size
+      naluSize = unpack('!I', data[offset:offset+4])[0]
+      offset += 4
+      if not dumpNALU(data, offset, naluSize):
+        return False
+      offset += naluSize
 
-  return hLen, hStr
-
+  return True
 
 def dumpTag(f):
   global lastTimestamp
@@ -133,31 +193,28 @@ def dumpTag(f):
     print("invalid stream id got " + str(a << 16 | b << 8 | c))
     return False
 
-  # audio
-  extraHeaderLen = 0
-  if type == 8:
-    extraHeaderLen, hStr = dumpAudioHead(f)
-  elif type == 9:
-    extraHeaderLen, hStr = dumpVideoHead(f)
-
-  # seek to end of data
-  # f.seek(dataSize - extraHeaderLen, 1)
+  # read payload
+  payload = f.read(dataSize)
 
   # compute sha1 of payload
   m = hashlib.sha1()
-  payload = f.read(dataSize - extraHeaderLen)
   m.update(payload)
   sha1 = m.hexdigest()
 
-  print("> TAG type " + str(tagType) +
-       " data size " + str(dataSize) +
-       " timestamp " + str(timestamp) +
-       " time diff " + str(timestamp - lastTimestamp) +
-       " sha1: " + str(sha1))
-  if hStr != "":
-    print(hStr)
+  tagTypeSrt = "unknown"
 
-  print ("   DATA: " + payload[0:31].encode('hex'))
+  if tagType == 9:
+    tagTypeSrt = "Video"
+  elif tagType == 8:
+    tagTypeSrt = "Audio"
+  elif tagType == 18:
+    tagTypeSrt = "ScriptData"
+
+  print("> TAG type " + str(tagType) + " (" + tagTypeSrt + ")" +
+         " data size " + str(dataSize) +
+         " timestamp " + str(timestamp) +
+         " time diff " + str(timestamp - lastTimestamp) +
+         " sha1: " + str(sha1))
 
   # read previous tag size
   prevLen = unpack('!I', f.read(4))[0]
@@ -168,8 +225,16 @@ def dumpTag(f):
 
   lastTimestamp = timestamp
 
-  return True
+  # dump payload
+  if tagType == 9:
+    # video
+    if not dumpVideoPayload(payload):
+      return False
+  elif tagType == 8:
+    if not dumpAudioPayload(payload):
+      return False
 
+  return True
 
 with open(in_name, 'rb') as f:
   try:
@@ -178,7 +243,7 @@ with open(in_name, 'rb') as f:
       sys.exit(1)
     i = 0
     while dumpTag(f):
-      ++i
+      i += 1
   except EOFError:
     print("unexpected end of file")
 
